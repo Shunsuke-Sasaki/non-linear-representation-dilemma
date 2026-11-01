@@ -1,0 +1,60 @@
+{
+ "setting": "Both Equality Relations",
+ "embedding_size": 4,
+ "hidden": 16,
+ "layer": 0,
+ "variable_dims": [
+  [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7
+  ],
+  [
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15
+  ]
+ ],
+ "mlp_train": 65536,
+ "mlp_dev": 10000,
+ "mlp_test": 10000,
+ "mlp_batch": 1024,
+ "mlp_max_epochs": 5,
+ "mlp_patience": 3,
+ "iv_train": 64000,
+ "iv_dev": 2000,
+ "iv_test": 2000,
+ "iv_data_seed": 20261009,
+ "cal_size": 2000,
+ "cal_seed": 20261010,
+ "revnet_blocks": 10,
+ "revnet_width": 128,
+ "map_batch": 6400,
+ "map_lr": 0.001,
+ "map_max_epochs": 3,
+ "map_patience": 5,
+ "map_threshold": 0.001,
+ "map_sched_patience": 10,
+ "dev_seeds": [
+  5234,
+  4641
+ ],
+ "main_seeds": [
+  4287,
+  3837,
+  9097,
+  2635,
+  5137
+ ],
+ "n_inits": 1
+}

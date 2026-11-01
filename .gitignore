@@ -7,3 +7,5 @@ playground.ipynb
 *.pyc
 **/wandb/**
 *.log
+.venv/
+Results/SharedMapping/**

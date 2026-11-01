@@ -16,8 +16,10 @@ class Distributed_Alignment_Search_LLM(Distributed_Alignment_Search):
         
     def register_intervention_hook(self, layer):
         def hook_fn(module, input, output):
-            twotuple=(len(output)==2)
-            output=output[0].clone().detach()
+            output_is_tuple = isinstance(output, tuple)
+            output_tuple_length = len(output) if output_is_tuple else 0
+            output_tensor = output[0] if output_is_tuple else output
+            output = output_tensor.clone().detach()
             if self.mode_info[0] == "source":
                 # Extract column indices (list)
                 col_indices = self.Variable_Dimensions[self.mode_info[1]]
@@ -33,10 +35,12 @@ class Distributed_Alignment_Search_LLM(Distributed_Alignment_Search):
                 result_tensor = self.Transformation_Class.phi(output[torch.arange(output.size(0)), self.mode_info[2]])
                 result_tensor = torch.where(self.mode_info[1], self.source_activations, result_tensor)
                 output_f[torch.arange(output.size(0)), self.mode_info[2]]=self.Transformation_Class.phi_inv(result_tensor)
-                if twotuple:
+                if output_tuple_length == 2:
                     return (output_f,None)
-                else:
+                elif output_is_tuple:
                     return (output_f,)
+                else:
+                    return output_f
         
         return layer.register_forward_hook(hook_fn)
 

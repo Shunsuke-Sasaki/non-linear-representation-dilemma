@@ -1,4 +1,5 @@
 import random
+import re
 import numpy as np
 import torch
 import pandas as pd
@@ -208,11 +209,13 @@ def make_intervention_dataset_first_input_intervention(size,embedding_size):
 #################################################
 
     
-def make_intervention_dataset_LLM(data,size,tokenizer):
+def make_intervention_dataset_LLM(data,size,tokenizer,base_examples=None):
+    if base_examples is not None and len(base_examples) != size:
+        raise ValueError("base_examples must contain one example per intervention sample")
     DAS_data=[]
-    for _ in tqdm(range(size)):
+    for index in tqdm(range(size)):
         DAS_data.append({})
-        base=random.choice(data)
+        base=base_examples[index] if base_examples is not None else random.choice(data)
         source=random.choice(data)
         DAS_data[-1]["base"]=tokenizer(base[0])
         if source[1]:
@@ -247,10 +250,10 @@ def Preprocess_IOI_Data(data, tokenizer):
     for ac_data in tqdm(data["ioi_sentences"]):
         label=ac_data.split(" ")[-1]
         cutoff_text=ac_data[:-1*(len(label))-1]
-        if "." in ac_data:
-            prev_name=ac_data.split(".")[1].split(" ")[1]
-        elif "," in ac_data:
-            prev_name=ac_data.split(",")[1].split(" ")[1]
+        subject_match = re.search(r"\b([A-Z][a-z]+)\s+(?:gave|decided|wanted|said)\b", ac_data)
+        if subject_match is None:
+            raise ValueError(f"Could not identify the IOI subject in: {ac_data!r}")
+        prev_name = subject_match.group(1)
         pos_label=ac_data.find(label)
         pos_prev_name=ac_data.find(prev_name)
         if pos_label>pos_prev_name:
@@ -277,6 +280,8 @@ def Preprocess_IOI_Data(data, tokenizer):
 
 
 def Generate_LLM_Eval_Intervention_Data(filename,tokenizer,LLM_test_samples,Intervention_train_size,Intervention_eval_size,Intervention_test_size):
+    if LLM_test_samples != Intervention_test_size:
+        raise ValueError("LLM_test_samples must match Intervention_test_size for paired test examples")
     data=pd.read_parquet(filename, engine='pyarrow')
     if len(data) > 2*Intervention_train_size:
         print(f"Truncating data from {len(data)} to {2*Intervention_train_size}")
@@ -291,8 +296,9 @@ def Generate_LLM_Eval_Intervention_Data(filename,tokenizer,LLM_test_samples,Inte
     preprocessed_eval=preprocess[split_p1:split_p2]
     preprocessed_test=preprocess[split_p2:]
     
+    llm_test_examples = random.sample(preprocessed_test, LLM_test_samples)
     LLM_test_data=[[],[]]
-    for dp in tqdm(random.sample(preprocessed_test,LLM_test_samples)):
+    for dp in tqdm(llm_test_examples):
         LLM_test_data[0].append(tokenizer(dp[0], return_tensors="pt"))
         if dp[1]:
             LLM_test_data[1].append(torch.stack([
@@ -307,7 +313,9 @@ def Generate_LLM_Eval_Intervention_Data(filename,tokenizer,LLM_test_samples,Inte
     
     DAS_Train_o=make_intervention_dataset_LLM(preprocessed_train,Intervention_train_size,tokenizer)
     DAS_Eval_o=make_intervention_dataset_LLM(preprocessed_eval,Intervention_eval_size,tokenizer)
-    DAS_Test_o=make_intervention_dataset_LLM(preprocessed_test,Intervention_test_size,tokenizer)
+    DAS_Test_o=make_intervention_dataset_LLM(
+        preprocessed_test, Intervention_test_size, tokenizer, base_examples=llm_test_examples
+    )
 
     return LLM_test_data,DAS_Train_o,DAS_Eval_o,DAS_Test_o
 
@@ -335,7 +343,9 @@ def Makedataset(baba_templates,abba_templates,Names_Split,Places,Objects,size):
     return ret
     
 
-def Generate_LLM_Eval_Intervention_Data_NameSplit(tokenizer,LLM_test_samples,Intervention_train_size,Intervention_eval_size,Intervention_test_size,randomsamples=200000):
+def Generate_LLM_Eval_Intervention_Data_NameSplit(tokenizer,LLM_test_samples,Intervention_train_size,Intervention_eval_size,Intervention_test_size,randomsamples=200000,name_split_seed=None):
+    if LLM_test_samples != Intervention_test_size:
+        raise ValueError("LLM_test_samples must match Intervention_test_size for paired test examples")
     baba_templates = [
         "Then, {B} and {A} went to the {PLACE}. {B} gave a {OBJECT} to {A}",
         "Then, {B} and {A} had a lot of fun at the {PLACE}. {B} gave a {OBJECT} to {A}",
@@ -372,6 +382,8 @@ def Generate_LLM_Eval_Intervention_Data_NameSplit(tokenizer,LLM_test_samples,Int
     ]
     
     Names   = ['Faye', 'Yolanda', 'Fannie', 'Mildred', 'Doris', 'Melissa', 'Shannon', 'Natasha', 'Nellie', 'Stacey', 'Sonia', 'Kelly', 'Marsha', 'Inez', 'Jacqueline', 'Violet', 'Miriam', 'Jerry', 'Brian', 'Stella', 'Rachel', 'Pauline', 'Yvette', 'Rebecca', 'Marilyn', 'Diana', 'Chelsea', 'Kathryn', 'Lula', 'Anne', 'Bernadette', 'Loretta', 'Kevin', 'David', 'Alyssa', 'Gwen', 'Amanda', 'Charlene', 'Irma', 'Megan', 'Stacy', 'Virginia', 'Rosemarie', 'Jessica', 'Paula', 'Richard', 'Jackie', 'Teresa', 'Leona', 'Carol', 'Juana', 'Kristi', 'Evelyn', 'Brandy', 'William', 'Deanna', 'Sarah', 'Eleanor', 'Maggie', 'Harriet', 'Kari', 'Rosa', 'Angie', 'Kristina', 'Melanie', 'Mark', 'Martha', 'Lorraine', 'Agnes', 'Janet', 'Geneva', 'Robin', 'Ella', 'Heidi', 'Suzanne', 'Wilma', 'Velma', 'Pat', 'Estelle', 'Erika', 'Alice', 'Sophia', 'Anita', 'Alicia', 'Carmen', 'Lee', 'Grace', 'Susan', 'Sheila', 'Leigh', 'Mona', 'Kim', 'Jody', 'Mattie', 'Ginger', 'Ethel', 'Theresa', 'Dianne', 'Marian', 'Jessie']
+    if name_split_seed is not None:
+        random.Random(name_split_seed).shuffle(Names)
     Places  = ['store', 'theater', 'museum', 'shop', 'beach', 'school', 'mountain', 'desert', 'river', 'cafe', 'library', 'cave', 'forest', 'market', 'zoo', 'park', 'home', 'lake', 'bar', 'gym']
     Objects = ['apple', 'raspberry', 'orange', 'grape', 'blueberry', 'coconut', 'banana', 'plum', 'kiwi', 'papaya', 'cherry', 'pear', 'blackberry', 'pineapple', 'honeydew', 'cantaloupe', 'watermelon', 'mango', 'peach', 'strawberry']
     
@@ -395,8 +407,11 @@ def Generate_LLM_Eval_Intervention_Data_NameSplit(tokenizer,LLM_test_samples,Int
     preprocessed_eval=Preprocess_IOI_Data(preprocessed_eval,tokenizer)
     preprocessed_test=Preprocess_IOI_Data(preprocessed_test,tokenizer)
     
+    llm_test_examples = random.sample(
+        preprocessed_test, min(LLM_test_samples, len(preprocessed_test))
+    )
     LLM_test_data=[[],[]]
-    for dp in tqdm(random.sample(preprocessed_test,min(LLM_test_samples,len(preprocessed_test)))):
+    for dp in tqdm(llm_test_examples):
         LLM_test_data[0].append(tokenizer(dp[0], return_tensors="pt"))
         if dp[1]:
             LLM_test_data[1].append(torch.stack([
@@ -411,7 +426,9 @@ def Generate_LLM_Eval_Intervention_Data_NameSplit(tokenizer,LLM_test_samples,Int
     
     DAS_Train_o=make_intervention_dataset_LLM(preprocessed_train,Intervention_train_size,tokenizer)
     DAS_Eval_o=make_intervention_dataset_LLM(preprocessed_eval,Intervention_eval_size,tokenizer)
-    DAS_Test_o=make_intervention_dataset_LLM(preprocessed_test,Intervention_test_size,tokenizer)
+    DAS_Test_o=make_intervention_dataset_LLM(
+        preprocessed_test, Intervention_test_size, tokenizer, base_examples=llm_test_examples
+    )
 
     return LLM_test_data,DAS_Train_o,DAS_Eval_o,DAS_Test_o
 

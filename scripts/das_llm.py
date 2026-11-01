@@ -43,6 +43,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default="cuda:0", help="Device to run the model on ('cuda:0', 'cpu', etc.).")
     parser.add_argument('--dtype', type=str, default="bfloat16", choices=["float32", "float64", "bfloat16"], help="Data type for the model.")
     parser.add_argument('--name-split', action="store_true", help="Use name split dataset.")
+    parser.add_argument('--name-split-seed', type=int, default=None, help="Shuffle names before splitting; requires --name-split.")
     # Transformation Config
     parser.add_argument('--transformation_type', type=str, default="RevNet", choices=["RevNet", "Rotation"], help="Type of transformation function.")
     parser.add_argument('--in_features', type=int, default=2048, help="Input features for the transformation function (hidden layer size).")
@@ -66,10 +67,10 @@ def parse_args():
     # Dataset Config
     parser.add_argument('--dataset_repo_id', type=str, default="fahamu/ioi", help="HuggingFace dataset repository ID.")
     parser.add_argument('--dataset_filename', type=str, default="mecha_ioi_26m.parquet", help="Filename of the dataset within the repository.")
-    parser.add_argument('--llm_test_samples', type=int, default=2**14, help="Number of samples for initial LLM testing.")
+    parser.add_argument('--llm_test_samples', type=int, default=2**14, help="Number of samples for initial LLM testing; must match --intervention_test_size.")
     parser.add_argument('--intervention_train_size', type=int, default=1000000, help="Number of samples for intervention training.")
     parser.add_argument('--intervention_eval_size', type=int, default=2048, help="Number of samples for intervention evaluation.")
-    parser.add_argument('--intervention_test_size', type=int, default=2**14, help="Number of samples for intervention testing.")
+    parser.add_argument('--intervention_test_size', type=int, default=2**14, help="Number of samples for intervention testing; must match --llm_test_samples.")
 
     # Experiment Specific Config
     parser.add_argument('--layer_index', type=int, default=9, help="Index of the model layer to apply the intervention.")
@@ -93,6 +94,10 @@ def main(args):
                     "Trained" : args.model_init_mode}
 
     DEVICE = args.device
+    if args.name_split_seed is not None and not args.name_split:
+        raise ValueError("--name-split-seed requires --name-split")
+    if args.llm_test_samples != args.intervention_test_size:
+        raise ValueError("--llm_test_samples must match --intervention_test_size for paired test examples")
 
     transformation_config = {"type"        : args.transformation_type,
                              "in_features" : args.in_features}
@@ -105,9 +110,9 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, revision=args.model_revision)
     tokenizer.pad_token = tokenizer.eos_token
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16 if args.dtype == "bfloat16" else torch.float64
-    ds_name = "default"
+    ds_name = "default_v3"
     if args.name_split:
-        ds_name = "name_split"
+        ds_name = f"name_split_v3_seed{args.name_split_seed}" if args.name_split_seed is not None else "name_split_v3"
     
     print(f"Loading datasets from {args.model_name.replace('/', '_')}/{ds_name}")
     if os.path.exists(f"datasets/{args.model_name.replace('/', '_')}/{ds_name}"):
@@ -125,7 +130,8 @@ def main(args):
                                                                                     LLM_test_samples=args.llm_test_samples,
                                                                                     Intervention_train_size=args.intervention_train_size,
                                                                                     Intervention_eval_size=args.intervention_eval_size,
-                                                                                    Intervention_test_size=args.intervention_test_size)
+                                                                                    Intervention_test_size=args.intervention_test_size,
+                                                                                    name_split_seed=args.name_split_seed)
         else:
             print(f"Loading '{args.dataset_repo_id}' file '{args.dataset_filename}'...")
             dataset_path = hf_hub_download(
