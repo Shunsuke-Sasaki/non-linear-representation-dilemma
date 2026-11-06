@@ -84,6 +84,21 @@ class MainEvalTests(unittest.TestCase):
         self.assertLess(me.orthogonality_error(a.matrix()), 1e-4)
         self.assertTrue(torch.allclose(a.inverse(a(h)), h, atol=1e-4))
 
+    def test_alignment_stats(self):
+        dims = me.FULL["variable_dims"]
+        s = me.alignment_stats(torch.eye(24, device=DEVICE), dims)
+        self.assertAlmostEqual(s["identity_distance"], 0.0, places=5)
+        self.assertAlmostEqual(s["in_block_fraction"], 1.0, places=5)
+        swap = torch.eye(24, device=DEVICE)[torch.cat([torch.arange(12, 24), torch.arange(12)])]
+        self.assertAlmostEqual(me.alignment_stats(swap, dims)["in_block_fraction"], 0.0, places=5)
+        within = torch.block_diag(me.random_orthogonal_alignment(12, 1, DEVICE).Q,
+                                  me.random_orthogonal_alignment(12, 2, DEVICE).Q)
+        self.assertAlmostEqual(me.alignment_stats(within, dims)["in_block_fraction"], 1.0, places=4)
+        rand = [me.alignment_stats(me.random_orthogonal_alignment(24, k, DEVICE).Q, dims)["in_block_fraction"]
+                for k in range(50)]
+        print(f"random orthogonal in_block_fraction: mean {sum(rand) / len(rand):.3f}")
+        self.assertLess(abs(sum(rand) / len(rand) - 0.5), 0.05)
+
     def test_intervention_data_is_label_balanced(self):
         for gen in (make_intervention_dataset_AndOrAnd, make_intervention_dataset_AndOr):
             set_seed(1)

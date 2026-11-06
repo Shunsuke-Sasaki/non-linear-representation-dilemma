@@ -157,6 +157,20 @@ def orthogonality_error(matrix):
     return (matrix.T @ matrix - eye).abs().max().item()
 
 
+def alignment_stats(matrix, variable_dims):
+    """How close an alignment is to the identity and to a within-variable-block map.
+
+    in_block_fraction is the share of squared entries that map a variable block onto itself
+    (1 = block-diagonal; about 0.5 for a random 24x24 orthogonal matrix with two 12-dim blocks).
+    Both numbers are invariant to transposition, so the h @ Q convention does not matter.
+    """
+    m = matrix.detach().float()
+    eye = torch.eye(m.shape[0], device=m.device)
+    within = sum((m[d][:, d] ** 2).sum() for d in (torch.as_tensor(v, device=m.device) for v in variable_dims))
+    return {"identity_distance": torch.linalg.norm(m - eye).item(),
+            "in_block_fraction": (within / (m ** 2).sum()).item()}
+
+
 # --- from notebooks/Alignment_Adaptation_Diagnostic.py ---------------------------------------
 def random_orthogonal_alignment(n, seed, device):
     generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -530,6 +544,8 @@ class Experiment:
                                            condition=cond, repeat=r, adapt_init=ainit, adapt_examples=n,
                                            adapt_best_update=best_update, adapt_dev_loss=dev_loss,
                                            alignment_cost=cost, orthogonality_error=orthogonality_error(a.matrix()),
+                                           **alignment_stats(a.matrix(), c["variable_dims"]),
+                                           alignment_matrix=a.matrix().detach().cpu().tolist(),
                                            seconds=time.time() - t0))
                     log(f"fold {fold_index} {S}{C}{T} repeat {r} done ({time.time() - t_start:.0f}s so far)")
 
@@ -545,6 +561,8 @@ class Experiment:
         rows = []
         for f in sorted(self.path("adapt").glob("fold*.jsonl")):
             rows += [json.loads(x) for x in f.read_text().splitlines()]
+        matrices = {r["key"]: torch.tensor(r.pop("alignment_matrix")) for r in rows if "alignment_matrix" in r}
+        atomic_save(matrices, self.path("adapt_alignments.pt"))
         df = pd.DataFrame(rows)
         df.to_csv(self.path("adapt_results.csv"), index=False)
 
@@ -581,6 +599,12 @@ class Experiment:
             ch = sub.groupby(["S", "C", "T", "adapt_init", "condition"])[["iia_label_changed", "iia_label_unchanged"]].mean()
             lines += [f"## IIA split by whether the label changes (n={max(c['adapt_sizes'])})", "",
                       md(ch.round(4)), ""]
+            for col, title in [("identity_distance", "Target A_m: Frobenius distance from the identity"),
+                               ("in_block_fraction", "Target A_m: share of squared entries within variable blocks "
+                                                     "(1 = block-diagonal, ~0.5 random)")]:
+                t = main.groupby(["S", "C", "T", "adapt_init", "condition", "adapt_examples"])[col]
+                lines += [f"## {title}, mean over folds and repeats", "",
+                          md(t.mean().unstack("adapt_examples").round(3)), ""]
         self.path("summary.md").write_text("\n".join(lines) + "\n")
         log(f"wrote {self.path('summary.md')}")
 
