@@ -1,0 +1,90 @@
+{
+  "issue": 485,
+  "repository": "https://github.com/Shunsuke-Sasaki/non-linear-representation-dilemma",
+  "source_commit": "88d6523b08a50781320222de9fc383f3e1c41641",
+  "device": "cuda",
+  "model": {
+    "input_size": 24,
+    "hidden_size": 24,
+    "hidden_layers": 3,
+    "evaluation_layer": 2,
+    "embedding_size": 4,
+    "intervention_dimensions": [
+      {"start": 0, "stop_exclusive": 12},
+      {"start": 12, "stop_exclusive": 24}
+    ],
+    "model_seeds": {
+      "source": 4287,
+      "held_out_target": 3837
+    },
+    "paired_seeds_across_structures": true,
+    "training": {
+      "train_examples": 1280000,
+      "eval_examples": 10000,
+      "test_examples": 10000,
+      "batch_size": 6400,
+      "max_epochs": 50,
+      "early_stopping_patience": 5,
+      "early_stopping_improvement_threshold": 0.001,
+      "reduce_lr_on_plateau_patience": 10,
+      "learning_rate": 0.001
+    }
+  },
+  "seed_scheme": {
+    "model_training": "reset to the model seed before generating train, eval, and test splits",
+    "source_mapping_offset": 100000,
+    "target_adaptation_offset": 200000,
+    "shared_mapping_init_offset": 400000,
+    "shared_mapping_training_offset": 410000,
+    "split_offsets": {
+      "train_or_adapt": 0,
+      "eval": 1,
+      "test": 2
+    },
+    "activity_inputs_seed": 500000,
+    "target_alignment_training_offset": 600000
+  },
+  "shared_mapping": {
+    "architecture": "RevNet",
+    "number_of_blocks": 10,
+    "hidden_size": 24,
+    "source_alignment": "identity_fixed",
+    "train_examples": 1280000,
+    "eval_examples": 10000,
+    "test_examples": 10000,
+    "batch_size": 6400,
+    "max_epochs": 50,
+    "early_stopping_patience": 5,
+    "early_stopping_improvement_threshold": 0.001,
+    "learning_rate": 0.001,
+    "reduce_lr_on_plateau_patience": 10
+  },
+  "target_alignment": {
+    "initialization": "activity_based_orthogonal_procrustes",
+    "adaptation_examples": 10000,
+    "eval_examples": 10000,
+    "test_examples": 10000,
+    "activity_examples": 10000,
+    "learning_rate": 0.001,
+    "batch_size": 6400,
+    "max_epochs": 50,
+    "early_stopping_patience": 5,
+    "early_stopping_improvement_threshold": 0.001,
+    "reduce_lr_on_plateau_patience": 10
+  },
+  "structures": {
+    "E": "AndOrAnd",
+    "F": "AndOr"
+  },
+  "conditions": [
+    "EEE",
+    "EEF",
+    "EFE",
+    "EFF",
+    "FEE",
+    "FEF",
+    "FFE",
+    "FFF"
+  ],
+  "wandb": false
+}
