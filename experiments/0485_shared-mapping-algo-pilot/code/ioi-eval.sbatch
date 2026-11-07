@@ -1,6 +1,7 @@
 #!/bin/bash
 # IOI part of Issue 485 (Pythia-410m seeds). Usage (from the experiment directory):
 #   sbatch code/ioi-eval.sbatch smoke                     # tiny end-to-end run with timings, then tests
+#   sbatch code/ioi-eval.sbatch bench                     # full-size per-update timings, high vs highest precision (after smoke)
 #   sbatch code/ioi-eval.sbatch prepare                   # download models and data, build pairs
 #   sbatch --array=0-N code/ioi-eval.sbatch maps --num-tasks M [--kind individual] [--cand alpha]
 #   sbatch --array=0-9 code/ioi-eval.sbatch adapt         # (fold, state) tasks

@@ -23,6 +23,7 @@ Stages (resumable):
   adapt --task t                held-out evaluation for (fold, state) task t
   summarize                     tables
   smoke                         tests-sized end-to-end run with timings under results/ioi_smoke
+  bench                         full-size timings and precision checks (needs smoke data) -> results/ioi_bench
 """
 import argparse
 import copy
@@ -856,9 +857,131 @@ def run_stage(exp, stage, task, num_tasks, kind=None, cand=None):
         raise ValueError(stage)
 
 
+def bench(device, out_dir, n_updates=100, n_warm=10):
+    """Full-size per-update / eval timings and numerical checks for each matmul precision.
+
+    Uses the smoke data and models (seeds 1-3); the 4-member joint map reuses seed 1 as the 4th member,
+    which costs the same as a distinct model. Batch sizes are the FULL ones.
+    """
+    exp = Experiment(ROOT / "results" / "ioi_smoke", FULL, device, offline=True)
+    c = FULL
+    train = exp.pairs("default", "train")
+    model = exp.get_model("trained", 1)
+    models4 = [model, exp.get_model("trained", 2), exp.get_model("trained", 3), model]
+    g = torch.Generator().manual_seed(0)
+
+    def timed(step, n):
+        for _ in range(n_warm):
+            step()
+        torch.cuda.synchronize()
+        t = time.time()
+        for _ in range(n):
+            step()
+        torch.cuda.synchronize()
+        return (time.time() - t) / n
+
+    def sample(n):
+        return train.subset(torch.randint(len(train), (n,), generator=g))
+
+    results = {}
+    for precision in ["high", "highest"]:
+        torch.set_float32_matmul_precision(precision)
+        torch.cuda.reset_peak_memory_stats()
+        r = {}
+
+        # individual map: phi + identity alignment, batch 256
+        phi = exp.new_phi(1)
+        opt = optim.Adam(phi.parameters(), lr=1e-4)
+
+        def step_individual():
+            sub = sample(c["map_batch"])
+            true, false, _ = sub.labels("pos")
+            opt.zero_grad()
+            loss, _ = pair_loss_acc(intervened_logits(phi, (model, IdentityAlignment()), sub, c, device), true, false)
+            loss.mean().backward()
+            opt.step()
+        r["map_individual_s_per_update"] = timed(step_individual, n_updates)
+
+        # joint map: 4 members (3 trainable Cayley alignments), 64 per member
+        phi = exp.new_phi(2)
+        aligns = [IdentityAlignment()] + [TrainableOrthogonalAlignment(random_orthogonal(c["hidden"], s)).to(device)
+                                          for s in (1, 2, 3)]
+        opt = optim.Adam(list(phi.parameters()) + [p for a in aligns[1:] for p in a.parameters()], lr=1e-4)
+        per = c["map_batch"] // 4
+
+        def step_joint():
+            opt.zero_grad()
+            for m, a in zip(models4, aligns):
+                sub = sample(per)
+                true, false, _ = sub.labels("pos")
+                loss, _ = pair_loss_acc(intervened_logits(phi, (m, a), sub, c, device), true, false)
+                (loss.mean() / 4).backward()
+            opt.step()
+        r["map_joint_s_per_update"] = timed(step_joint, n_updates)
+
+        # adaptation: frozen phi, one trainable alignment, batch 64
+        phi.eval()
+        for p in phi.parameters():
+            p.requires_grad_(False)
+        align = TrainableOrthogonalAlignment(random_orthogonal(c["hidden"], 4)).to(device)
+        opt = optim.Adam(align.parameters(), lr=1e-3)
+
+        def step_adapt():
+            sub = sample(c["adapt_batch"])
+            true, false, _ = sub.labels("pos")
+            opt.zero_grad()
+            loss, _ = pair_loss_acc(intervened_logits(phi, (model, align), sub, c, device), true, false)
+            loss.mean().backward()
+            opt.step()
+        r["adapt_s_per_update"] = timed(step_adapt, n_updates)
+
+        # evaluation throughput (pairs per second), scaled to the FULL test size
+        ev = train.subset(torch.arange(min(len(train), 2048)))
+        frozen = align.frozen()
+        evaluate(phi, (model, frozen), ev.subset(torch.arange(256)), "pos", c, device)
+        torch.cuda.synchronize()
+        t = time.time()
+        evaluate(phi, (model, frozen), ev, "pos", c, device)
+        torch.cuda.synchronize()
+        r["eval_s_per_pair"] = (time.time() - t) / len(ev)
+        r["eval_test_s"] = r["eval_s_per_pair"] * c["test"]
+
+        # numerical checks: no-op intervention (src = base) through a random RevNet + rotation
+        same = Pairs(ev.pool, ev.base, ev.base)
+        rot = FixedOrthogonal(random_orthogonal(c["hidden"], 3).to(device))
+        phi0 = exp.new_phi(7).eval()
+        diffs, flips = [], []
+        with torch.no_grad():
+            for start in range(0, len(same), c["eval_batch"]):
+                sub = same.subset(torch.arange(len(same))[start:start + c["eval_batch"]])
+                ids, mask, last = batch_tokens(sub.pool, sub.base, device)
+                plain = last_logits(model, ids, mask, last)
+                noop = intervened_logits(phi0, (model, rot), sub, c, device)
+                rows = torch.arange(len(sub), device=device)
+                tio, ts = sub.pool["tok_io"][sub.base].to(device), sub.pool["tok_s"][sub.base].to(device)
+                d_plain = plain[rows, tio] - plain[rows, ts]
+                d_noop = noop[rows, tio] - noop[rows, ts]
+                diffs.append((plain - noop).abs().max().item())
+                flips.append(((d_plain > 0) != (d_noop > 0)).cpu())
+            a = TrainableOrthogonalAlignment(random_orthogonal(c["hidden"], 1)).to(device)
+            a.skew.normal_(0, 0.01)
+            h = torch.randn(256, c["hidden"], device=device) * 3
+            r["cayley_inverse_max_abs_err"] = (a.inverse(a(h)) - h).abs().max().item()
+            r["revnet_inverse_max_abs_err"] = (phi0.inverse(phi0(h)) - h).abs().max().item()
+        r["noop_max_abs_dlogit"] = max(diffs)
+        r["noop_io_vs_s_flip_rate"] = torch.cat(flips).float().mean().item()
+        r["peak_gpu_gib"] = torch.cuda.max_memory_allocated() / 2**30
+        results[precision] = r
+        log(f"bench {precision}: " + json.dumps({k: round(v, 5) for k, v in r.items()}))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "bench.json").write_text(json.dumps(results, indent=2))
+    log(f"wrote {out_dir / 'bench.json'}")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["prepare", "maps", "adapt", "summarize", "smoke"])
+    parser.add_argument("stage", choices=["prepare", "maps", "adapt", "summarize", "smoke", "bench"])
     parser.add_argument("--task", type=int, default=0)
     parser.add_argument("--num-tasks", type=int, default=1)
     parser.add_argument("--kind", choices=["individual", "joint"], default=None)
@@ -872,6 +995,10 @@ def main():
     torch.set_num_threads(max(int(os.environ.get("SLURM_CPUS_PER_TASK", "1")), 1))
     log(f"stage={args.stage} task={args.task}/{args.num_tasks} kind={args.kind} cand={args.cand} "
         f"device={torch.cuda.get_device_name(device)}")
+
+    if args.stage == "bench":
+        bench(device, Path(args.root or ROOT / "results" / "ioi_bench"))
+        return
 
     if args.stage == "smoke":
         torch.set_float32_matmul_precision(SMOKE["matmul_precision"])
