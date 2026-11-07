@@ -85,13 +85,19 @@ class IOITests(unittest.TestCase):
         self.assertGreater(acc_t, 0.9)
 
     def test_cayley_alignment(self):
-        a = ie.TrainableOrthogonalAlignment(ie.random_orthogonal(1024, 1)).to(DEVICE)
-        with torch.no_grad():
-            a.skew.normal_(0, 0.01)
-        M = a.matrix()
-        self.assertLess((M.T @ M - torch.eye(1024, device=DEVICE)).abs().max().item(), 1e-3)
-        h = torch.randn(8, 1024, device=DEVICE)
-        self.assertLess((a.inverse(a(h)) - h).abs().max().item(), 1e-3)
+        # exact check in fp32; under TF32 ("high", used for the runs) the round trip error is ~1e-2
+        # (measured by `ioi_eval.py bench`, which also checks that it never flips IO vs S on a no-op intervention)
+        torch.set_float32_matmul_precision("highest")
+        try:
+            a = ie.TrainableOrthogonalAlignment(ie.random_orthogonal(1024, 1)).to(DEVICE)
+            with torch.no_grad():
+                a.skew.normal_(0, 0.01)
+                M = a.matrix()
+                self.assertLess((M.T @ M - torch.eye(1024, device=DEVICE)).abs().max().item(), 1e-3)
+                h = torch.randn(8, 1024, device=DEVICE)
+                self.assertLess((a.inverse(a(h)) - h).abs().max().item(), 1e-3)
+        finally:
+            torch.set_float32_matmul_precision(ie.SMOKE["matmul_precision"])
 
     def test_smoke_outputs(self):
         self.assertTrue((SMOKE_ROOT / "summary.md").exists())
