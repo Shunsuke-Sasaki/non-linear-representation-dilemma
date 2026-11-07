@@ -6,3 +6,6 @@ tqdm
 wandb
 pandas
 scipy
+transformers
+huggingface_hub
+pyarrow
