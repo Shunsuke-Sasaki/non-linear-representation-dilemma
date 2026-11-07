@@ -286,7 +286,7 @@ def last_logits(model, ids, mask, last, layer=None, edit=None):
     finally:
         if handle is not None:
             handle.remove()
-    return model.embed_out(hs[torch.arange(hs.shape[0], device=hs.device), last])
+    return model.get_output_embeddings()(hs[torch.arange(hs.shape[0], device=hs.device), last])
 
 
 class IdentityMap(nn.Module):
