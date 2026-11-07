@@ -126,7 +126,10 @@ def atomic_save(obj, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")  # unique: parallel tasks may write the same file
-    torch.save(obj, tmp)
+    with open(tmp, "wb") as fh:
+        torch.save(obj, fh)
+        fh.flush()
+        os.fsync(fh.fileno())  # a node failure after rename left truncated (16 MiB) files on Lustre (job 100041)
     tmp.replace(path)
 
 
@@ -613,8 +616,15 @@ class Experiment:
 
         state_path = out.with_suffix(".resume.pt")
         st = dict(update=0, best_loss=float("inf"), best=None, bad=0, history=[])
+        r = None
         if state_path.exists():
-            r = torch.load(state_path, map_location=self.device, weights_only=False)
+            try:
+                r = torch.load(state_path, map_location=self.device, weights_only=False)
+            except RuntimeError as e:  # truncated by a node failure: keep it for inspection and start over
+                bad = state_path.with_suffix(f".corrupt{int(time.time())}")
+                state_path.rename(bad)
+                log(f"unreadable resume file ({e.__class__.__name__}); moved to {bad.name}, starting from update 0")
+        if r is not None:
             phi.load_state_dict(r["phi"])
             for a, s in zip(trainable, r["aligns"]):
                 a.load_state_dict(s)
