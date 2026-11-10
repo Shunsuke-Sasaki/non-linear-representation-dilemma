@@ -234,6 +234,40 @@ def batch_tokens(pool, idx, device):
     return ids.to(device), mask.to(device), (lengths - 1).to(device)
 
 
+POSITIONS = ["last", "s2", "s1", "io"]
+
+
+def token_positions(pool, which):
+    """Per-prompt token index of the intervention site (cached in the pool), -1 where it cannot be located.
+
+    last: the final prompt token (END). s1 / s2: first / second occurrence of the S name's token (rows where it
+    occurs exactly twice). io: the IO name's token in the opening clause (rows where it occurs exactly once).
+    The name tokens are the answer tokens of parse_sentences, so a name tokenised differently inside the
+    sentence (e.g. sentence-initial, without a leading space) is not found and the row gets -1.
+    """
+    key = "_at_" + which
+    if key not in pool:
+        lengths = pool["lengths"]
+        if which == "last":
+            at = lengths - 1
+        elif which in ("s1", "s2", "io"):
+            ids = pool["ids"]
+            tok = (pool["tok_io"] if which == "io" else pool["tok_s"]).to(ids.dtype)
+            width = ids.shape[1]
+            hit = (ids == tok[:, None]) & (torch.arange(width)[None, :] < lengths[:, None])
+            count = hit.sum(1)
+            first = hit.int().argmax(1)
+            last = width - 1 - hit.flip(1).int().argmax(1)
+            if which == "io":
+                at = torch.where(count == 1, first, -1)
+            else:
+                at = torch.where(count == 2, first if which == "s1" else last, -1)
+        else:
+            raise ValueError(which)
+        pool[key] = at
+    return pool[key]
+
+
 ##############################################################################
 ##  Models and intervention                                                 ##
 ##############################################################################
@@ -274,15 +308,17 @@ def hidden_last(model, ids, mask, last, layer):
     return store["h"]
 
 
-def last_logits(model, ids, mask, last, layer=None, edit=None):
-    """Logits at the last prompt token; edit(h_last) replaces the layer output there."""
+def last_logits(model, ids, mask, last, layer=None, edit=None, at=None):
+    """Logits at the last prompt token; edit(h) replaces the layer output at token `at` (default: last)."""
     handle = None
     if edit is not None:
+        site = last if at is None else at
+
         def hook(module, inp, output):
             h = _out_tensor(output)
             rows = torch.arange(h.shape[0], device=h.device)
             new = h.clone()
-            new[rows, last] = edit(h[rows, last].float()).to(h.dtype)
+            new[rows, site] = edit(h[rows, site].float()).to(h.dtype)
             return _replace(output, new)
         handle = layer_module(model, layer).register_forward_hook(hook)
     try:
@@ -369,14 +405,22 @@ def intervened_logits(phi, member, pairs, cfg, device):
     k = cfg["n_var_dims"]
     b_ids, b_mask, b_last = batch_tokens(pairs.pool, pairs.base, device)
     s_ids, s_mask, s_last = batch_tokens(pairs.pool, pairs.src, device)
-    z_src = phi(align(hidden_last(model, s_ids, s_mask, s_last, cfg["layer"])))
+    which = cfg.get("position", "last")  # results/ioi_eval (no "position" key) used the last token
+    if which == "last":
+        b_at, s_at = b_last, s_last
+    else:
+        at = token_positions(pairs.pool, which)
+        b_at, s_at = at[pairs.base].to(device), at[pairs.src].to(device)
+        if (b_at < 0).any() or (s_at < 0).any():
+            raise ValueError(f"pairs without a {which} token; filter them first")
+    z_src = phi(align(hidden_last(model, s_ids, s_mask, s_at, cfg["layer"])))
 
     def edit(h):
         z = phi(align(h))
         z = torch.cat([z_src[:, :k], z[:, k:]], dim=1)
         return align.inverse(phi.inverse(z))
 
-    return last_logits(model, b_ids, b_mask, b_last, cfg["layer"], edit)
+    return last_logits(model, b_ids, b_mask, b_last, cfg["layer"], edit, at=b_at)
 
 
 def pair_loss_acc(logits, true, false):
@@ -544,10 +588,15 @@ class Experiment:
         d = self.data(split)
         pool, idx = d["pools"]["train"], d["sets"]["cal"]["base"]
         model = self.get_model(state, seed)
+        which = self.cfg.get("position", "last")
+        if which != "last":
+            idx = idx[token_positions(pool, which)[idx] >= 0]
         hs = []
         for start in range(0, len(idx), self.cfg["eval_batch"]):
-            ids, mask, last = batch_tokens(pool, idx[start:start + self.cfg["eval_batch"]], self.device)
-            hs.append(hidden_last(model, ids, mask, last, self.cfg["layer"]))
+            sel = idx[start:start + self.cfg["eval_batch"]]
+            ids, mask, last = batch_tokens(pool, sel, self.device)
+            at = last if which == "last" else token_positions(pool, which)[sel].to(self.device)
+            hs.append(hidden_last(model, ids, mask, at, self.cfg["layer"]))
         H = torch.cat(hs)
         atomic_save(H.cpu(), p)
         return H
