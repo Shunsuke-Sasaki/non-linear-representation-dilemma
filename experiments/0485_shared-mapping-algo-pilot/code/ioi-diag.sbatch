@@ -2,6 +2,11 @@
 # IOI follow-up diagnostics of Issue 485 (phase 1). Usage (from the experiment directory):
 #   sbatch code/ioi-diag.sbatch smoke-diag                          # checks on smoke data, then the diag stage
 #   sbatch --array=0-3 --dependency=afterok:<ID> code/ioi-diag.sbatch extra-maps   # individual C_pos maps, seeds 6-9
+# Phase 2:
+#   sbatch --time=00:30:00 code/ioi-diag.sbatch smoke2
+#   sbatch --array=0-5 --dependency=afterok:<smoke2> code/ioi-diag.sbatch loc-maps
+#   sbatch --array=0-11 --time=04:00:00 --dependency=afterok:<smoke2> code/ioi-diag.sbatch replace-maps
+#   sbatch --array=0-2 --dependency=afterok:<replace-maps> code/ioi-diag.sbatch replace-adapt
 #SBATCH --job-name=0485_ioi-diag
 #SBATCH --partition=gpu
 #SBATCH --nodes=1

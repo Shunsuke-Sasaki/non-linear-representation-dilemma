@@ -13,6 +13,11 @@ Stages:
   smoke                 checks on results/ioi_smoke (token positions, patching vs phi, an S2-position map)
   diag                  questions 1-2 and the accuracy of seeds 1-9 -> results/ioi_diag/diag
   extra-maps --task i   individual C_pos map of seed 6+i -> results/ioi_diag/extra_seeds
+Phase 2 (after the phase-1 results):
+  smoke2                checks of the phase-2 code paths on results/ioi_smoke
+  loc-maps --task 0-5   individual C_pos maps at other layers / positions (LOC_MAPS) -> results/ioi_diag/loc
+  replace-maps --task 0-11   joint maps with seeds 3, 4 replaced by 6, 7 among the sources -> results/ioi_diag/replace34
+  replace-adapt --task 0-2   shared_joint adaptation on held-out seeds 1, 2, 5 (same protocol as ioi_eval)
 Reuses ioi_eval.py (data in results/ioi_eval/data, same pairs, same map training).
 """
 import argparse
@@ -329,9 +334,128 @@ def extra_maps(device, task):
     log(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
 
 
+##############################################################################
+##  Phase 2                                                                 ##
+##############################################################################
+
+# A. Individual C_pos maps of seed 3 (and seed 1 as a control) at the sites suggested by the patching sweep.
+LOC_MAPS = [(3, "last", 16), (3, "last", 19), (3, "s2", 13), (1, "last", 13), (1, "last", 19), (1, "s2", 9)]
+# B. Sources without seeds 3 and 4: they are replaced by seeds 6 and 7 (chosen by the fixed rule "smallest
+# numbers" among the good extra seeds), keeping four sources and the same reference model per fold.
+REPLACE_HELDOUT, REPLACE_DROP, REPLACE_ADD = [1, 2, 5], [3, 4], [6, 7]
+
+
+def loc_exp(cfg, data_root, root, seed, position, layer, device):
+    cfg = dict(cfg, seeds=[seed], position=position, layer=layer)
+    exp = DiagExperiment(Path(root) / f"seed{seed}_{position}_L{layer}", cfg, device, data_root, offline=True)
+    exp.write_config()
+    return exp
+
+
+def replace_folds(seeds, heldouts, drop, add):
+    """ioi_eval folds (same indices and reference models) with `drop` replaced by `add` for the given held-outs."""
+    out = []
+    for held in seeds:
+        sources = [s for s in seeds if s != held]
+        if held in heldouts:
+            sources = [s for s in sources if s not in drop] + list(add)
+        out.append({"heldout": held, "sources": sources, "ref": sources[0]})
+    return out
+
+
+def replace_tasks(fold_indices):
+    return [(k, cand, split) for k in fold_indices for cand in ie.CANDIDATES for split in ie.SPLITS]
+
+
+def shared_adapt(exp, fold_index, splits, cands, state="trained"):
+    """The shared_joint rows of ioi_eval.Experiment.run_adapt (same inits, seeds and adaptation) for one fold."""
+    c = exp.cfg
+    fold = exp.folds()[fold_index]
+    held, ref = fold["heldout"], fold["ref"]
+    out = exp.path("adapt", f"fold{fold_index}_{state}.jsonl")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    done = {json.loads(x)["key"] for x in out.read_text().splitlines()} if out.exists() else set()
+    target = exp.get_model(state, held)
+    with out.open("a") as fh:
+        for split in splits:
+            test = exp.pairs(split, "test")
+            a_train, a_dev = exp.pairs(split, "adapt_train"), exp.pairs(split, "adapt_dev")
+            Qp, cost = exp.procrustes_init(state, ref, held, split)
+            inits = {"procrustes": Qp, "random_orthogonal": ie.random_orthogonal(
+                c["hidden"], ie.stable_seed("rand_orth", fold_index, state, split)).to(exp.device)}
+            for cand in cands:
+                phi = exp.load_phi("joint", state, split, cand, fold_index)
+                common = dict(fold=fold_index, heldout=held, ref=ref, sources=" ".join(map(str, fold["sources"])),
+                              state=state, split=split, cand=cand, condition="shared_joint")
+                for ainit, Q0 in inits.items():
+                    for n in c["adapt_sizes"]:
+                        key = f"{state}|{split}|{cand}|shared_joint|{ainit}|n{n}"
+                        if key in done:
+                            continue
+                        t0 = time.time()
+                        align, best_update, dev_loss, moved = exp.adapt(
+                            phi, target, Q0, a_train, a_dev, cand, n,
+                            ie.stable_seed("adapt", fold_index, state, split, cand, "shared_joint", ainit, n))
+                        res = ie.evaluate(phi, (target, align), test, cand, c, exp.device)
+                        fh.write(json.dumps(dict(res, key=key, adapt_init=ainit, adapt_examples=n,
+                                                 adapt_best_update=best_update, adapt_dev_loss=dev_loss,
+                                                 distance_from_init=moved,
+                                                 procrustes_cost=cost if ainit == "procrustes" else None,
+                                                 seconds=time.time() - t0, **common)) + "\n")
+                        fh.flush()
+                log(f"fold {fold_index} {split} {cand} done")
+
+
+def smoke2(device):
+    torch.set_float32_matmul_precision(ie.SMOKE["matmul_precision"])
+    out = ROOT / "results" / "ioi_diag_smoke2"
+    if out.exists():
+        shutil.rmtree(out)
+    cfg = dict(ie.SMOKE)
+    t = time.time()
+    exp = loc_exp(cfg, SMOKE_ROOT, out / "loc", 1, "s2", 5, device)
+    exp.train_map("individual", "trained", "pos", "default", 0)
+    assert exp.map_path("individual", "trained", "default", "pos", 0).exists()
+    assert json.loads(exp.path("config.json").read_text())["layer"] == 5
+    log(f"check A (map at another layer and position) passed ({time.time() - t:.0f}s)")
+    folds = replace_folds(cfg["seeds"], [1], [3], [3])  # smoke data has seeds 1-3 only: exercises the plumbing
+    assert replace_folds([1, 2, 3, 4, 5], REPLACE_HELDOUT, REPLACE_DROP, REPLACE_ADD)[4] == \
+        {"heldout": 5, "sources": [1, 2, 6, 7], "ref": 1}
+    assert replace_folds([1, 2, 3, 4, 5], REPLACE_HELDOUT, REPLACE_DROP, REPLACE_ADD)[0]["ref"] == 2
+    exp = DiagExperiment(out / "replace", cfg, device, SMOKE_ROOT, offline=True, folds=folds)
+    exp.write_config()
+    t = time.time()
+    for split in ie.SPLITS:
+        exp.train_map("joint", "trained", "pos", split, 0)
+    shared_adapt(exp, 0, ie.SPLITS, ["pos"])
+    rows = [json.loads(x) for x in exp.path("adapt", "fold0_trained.jsonl").read_text().splitlines()]
+    assert len(rows) == len(ie.SPLITS) * 2 * len(cfg["adapt_sizes"]), len(rows)
+    log(f"check B (replaced-source joint map and adaptation) passed ({time.time() - t:.0f}s), {len(rows)} rows")
+    log(f"smoke2 passed; peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+
+
+def eval_cfg():
+    cfg = json.loads((EVAL_ROOT / "config.json").read_text())
+    torch.set_float32_matmul_precision(cfg["matmul_precision"])
+    return cfg
+
+
+def replace_exp(cfg, device):
+    folds = replace_folds(cfg["seeds"], REPLACE_HELDOUT, REPLACE_DROP, REPLACE_ADD)
+    exp = DiagExperiment(ROOT / "results" / "ioi_diag" / "replace34", cfg, device, EVAL_ROOT, offline=True, folds=folds)
+    exp.write_config()
+    (exp.path("folds.json")).write_text(json.dumps(folds, indent=2))
+    return exp
+
+
+def fold_indices(cfg):
+    return [cfg["seeds"].index(h) for h in REPLACE_HELDOUT]
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["smoke", "diag", "extra-maps"])
+    parser.add_argument("stage", choices=["smoke", "diag", "extra-maps", "smoke2", "loc-maps", "replace-maps",
+                                          "replace-adapt"])
     parser.add_argument("--task", type=int, default=0)
     args = parser.parse_args()
     if not torch.cuda.is_available():
@@ -343,8 +467,22 @@ def main():
         smoke(device)
     elif args.stage == "diag":
         diag(device)
-    else:
+    elif args.stage == "extra-maps":
         extra_maps(device, args.task)
+    elif args.stage == "smoke2":
+        smoke2(device)
+    elif args.stage == "loc-maps":
+        seed, position, layer = LOC_MAPS[args.task]
+        exp = loc_exp(eval_cfg(), EVAL_ROOT, ROOT / "results" / "ioi_diag" / "loc", seed, position, layer, device)
+        exp.train_map("individual", "trained", "pos", "default", 0)
+    elif args.stage == "replace-maps":
+        cfg = eval_cfg()
+        k, cand, split = replace_tasks(fold_indices(cfg))[args.task]
+        replace_exp(cfg, device).train_map("joint", "trained", cand, split, k)
+    else:
+        cfg = eval_cfg()
+        shared_adapt(replace_exp(cfg, device), fold_indices(cfg)[args.task], ie.SPLITS, ie.CANDIDATES)
+    log(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
 
 
 if __name__ == "__main__":
