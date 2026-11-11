@@ -7,6 +7,9 @@
 #   sbatch --array=0-5 --dependency=afterok:<smoke2> code/ioi-diag.sbatch loc-maps
 #   sbatch --array=0-11 --time=04:00:00 --dependency=afterok:<smoke2> code/ioi-diag.sbatch replace-maps
 #   sbatch --array=0-2 --dependency=afterok:<replace-maps> code/ioi-diag.sbatch replace-adapt
+# Phase 3 (seed 4):
+#   sbatch --time=00:30:00 code/ioi-diag.sbatch smoke3
+#   sbatch --array=0-1 --dependency=afterok:<smoke3> code/ioi-diag.sbatch seed4
 #SBATCH --job-name=0485_ioi-diag
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
