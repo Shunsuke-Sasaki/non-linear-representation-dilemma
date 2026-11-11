@@ -473,9 +473,12 @@ def patching_margins(model, pairs, n_layers, batch, device):
     """Full-vector patching (source -> base) at every (layer, position), measured on the logit margin
     m = logit[counterfactual answer] - logit[other name] of each candidate.
 
-    d = m_patched - m_unpatched per pair. effect = mean d on label-changed pairs - mean d on label-unchanged pairs
-    (the second term removes generic disruption). effect_norm = effect / mean |logit[IO] - logit[S]| of the
-    unpatched base prompts: a patch that fully swaps the answer gives about 2, no effect gives 0.
+    d = m_patched - m_unpatched per pair. With g = logit[base IO] - logit[base S], m = +g on label-unchanged pairs
+    and -g on label-changed pairs, so effect = mean d (changed) + mean d (unchanged)
+    = mean dg (candidate variable equal) - mean dg (different): generic disruption (dg independent of the
+    candidate) cancels. effect_norm = effect / mean |g| unpatched: a full swap of the answer gives about 2, no
+    candidate-specific effect 0. (Commit 7328035 wrote mean d (changed) - mean d (unchanged), which is about
+    -2 mean dg, i.e. generic disruption; results written by it are re-scored from delta_* in ioi_seed4_summary.py.)
     """
     cands = ie.CANDIDATES
     labels = {c: pairs.labels(c) for c in cands}
@@ -517,7 +520,7 @@ def patching_margins(model, pairs, n_layers, batch, device):
             d = (v[:, j] - none[:, j]).double()
             dc, du = d[changed], d[~changed]
             se = (dc.var() / len(dc) + du.var() / len(du)).sqrt().item()
-            effect = (dc.mean() - du.mean()).item()
+            effect = (dc.mean() + du.mean()).item()
             out.append({"layer": layer, "position": p, "cand": c, "effect": effect, "effect_se": se,
                         "effect_norm": effect / scale, "effect_norm_se": se / scale,
                         "delta_changed": dc.mean().item(), "delta_unchanged": du.mean().item(),

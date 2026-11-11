@@ -1,8 +1,8 @@
 """Summary of the phase-3 seed-4 checks (stdlib only; runs on the login node).
 
 Reads results/ioi_diag/seed4/{patch_margins.csv, probes.csv, restricted.jsonl} (ioi_diag.py seed4) and writes
-results/ioi_diag/seed4/summary.md: per model, the normalised margin effect of patching (effect_norm, about 2 =
-full swap, 0 = none) by layer for END and S2, the linear-probe test accuracy by layer, and the restricted IIA.
+results/ioi_diag/seed4/summary.md: per model, the candidate-specific margin effect of patching (recomputed
+effect_norm, about 2 = full swap, 0 = none) by layer for END and S2, the linear-probe test accuracy by layer, and the restricted IIA.
 
 Usage: python3 ioi_seed4_summary.py <EXP>
 """
@@ -10,6 +10,13 @@ import csv
 import json
 import sys
 from pathlib import Path
+
+
+def eff(r):
+    """Candidate-specific effect_norm recomputed from the saved means: (delta_changed + delta_unchanged) / scale
+    (= mean dg when the candidate variable is equal - when it differs). The effect column of commit 7328035 used
+    delta_changed - delta_unchanged, which measures generic disruption instead."""
+    return (float(r["delta_changed"]) + float(r["delta_unchanged"])) / float(r["scale"])
 
 
 def main():
@@ -31,9 +38,8 @@ def main():
                     "| layer | " + " | ".join(f"{st} {s}" for st, s in models) + " |", "|---|" + "---|" * len(models)]
             idx = {(r["state"], r["seed"], int(r["layer"])): r for r in patch if r["cand"] == cand and r["position"] == pos}
             for L in layers:
-                out.append(f"| {L} | " + " | ".join(
-                    f"{float(idx[(st, s, L)]['effect_norm']):.3f} ± {float(idx[(st, s, L)]['effect_norm_se']):.3f}"
-                    for st, s in models) + " |")
+                out.append(f"| {L} | " + " | ".join(f"{eff(idx[(st, s, L)]):.3f} ± {float(idx[(st, s, L)]['effect_norm_se']):.3f}"
+                                                for st, s in models) + " |")
             out.append("")
     for cand in ["pos", "alpha"]:
         for pos in ["last", "s2"]:
