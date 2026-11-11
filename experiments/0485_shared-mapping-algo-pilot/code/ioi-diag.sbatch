@@ -10,6 +10,9 @@
 # Phase 3 (seed 4):
 #   sbatch --time=00:30:00 code/ioi-diag.sbatch smoke3
 #   sbatch --array=0-1 --dependency=afterok:<smoke3> code/ioi-diag.sbatch seed4
+# Phase 4 (adaptation variance):
+#   sbatch --time=00:30:00 code/ioi-diag.sbatch smoke4
+#   sbatch --array=0-7 --time=01:00:00 --dependency=afterok:<smoke4> code/ioi-diag.sbatch variance
 #SBATCH --job-name=0485_ioi-diag
 #SBATCH --partition=gpu
 #SBATCH --nodes=1

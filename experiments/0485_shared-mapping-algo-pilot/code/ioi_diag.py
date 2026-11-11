@@ -22,6 +22,10 @@ Phase 3 (does seed 4 partly run the algorithm?):
   smoke3                checks of the phase-3 code paths on results/ioi_smoke
   seed4 --task 0        logit-margin patching + linear probes, trained 1, 3, 4 / random 1, 4 -> results/ioi_diag/seed4
   seed4 --task 1        IIA restricted to pairs the held-out model answers correctly (held-out 4 and 1)
+Phase 4 (run-to-run variance of the adaptation):
+  smoke4                checks on results/ioi_smoke
+  variance --task 0-7   5 adaptation repeats (VAR_RUNS) for the original folds 0-4 and the replace34 folds of
+                        held-out 1, 2, 5 -> results/ioi_diag/variance
 Reuses ioi_eval.py (data in results/ioi_eval/data, same pairs, same map training).
 """
 import argparse
@@ -724,10 +728,86 @@ def smoke3(device):
     log(f"smoke3 passed; peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
 
 
+##############################################################################
+##  Phase 4: run-to-run variance of the adaptation                          ##
+##############################################################################
+# Every number so far is one adaptation run. Repeat only the adaptation of the held-out A_m (the shared maps are
+# not retrained), Procrustes init, default split. Repeat 0 reproduces the original run (same minibatch seed, the
+# first n adaptation pairs); repeats 1.. draw a new minibatch seed and a new random n-subset of the 4096
+# adaptation pairs (for n = 4096 only the order changes). Variance of the map training itself is not covered.
+VAR_RUNS = [("pos", "shared_joint", 256), ("pos", "shared_joint", 1024), ("pos", "shared_joint", 4096),
+            ("pos", "no_shared", 4096), ("alpha", "shared_joint", 4096)]
+VAR_REPEATS = 5
+# tasks: original ioi_eval folds 0-4 (held-out 1-5), then the replace34 folds of held-out 1, 2, 5
+VAR_TASKS = [("orig", k) for k in range(5)] + [("replace34", k) for k in (0, 1, 4)]
+
+
+def adapt_variance(exp, fold_index, runs, repeats, out_path, tag, split="default", state="trained"):
+    c, device = exp.cfg, exp.device
+    fold = exp.folds()[fold_index]
+    held, ref = fold["heldout"], fold["ref"]
+    target = exp.get_model(state, held)
+    test, a_train, a_dev = exp.pairs(split, "test"), exp.pairs(split, "adapt_train"), exp.pairs(split, "adapt_dev")
+    Qp, _ = exp.procrustes_init(state, ref, held, split)
+    phis = {}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("a") as fh:
+        for cand, cond, n in runs:
+            key = (cand, cond)
+            if key not in phis:
+                phis[key] = exp.load_phi("joint", state, split, cand, fold_index) if cond == "shared_joint" \
+                    else ie.IdentityMap()
+            base_seed = ie.stable_seed("adapt", fold_index, state, split, cand, cond, "procrustes", n)
+            for r in range(repeats):
+                t0 = time.time()
+                if r == 0:
+                    train, seed = a_train, base_seed
+                else:
+                    perm = torch.randperm(len(a_train), generator=torch.Generator().manual_seed(
+                        ie.stable_seed("subset", tag, fold_index, cand, cond, n, r)))
+                    train, seed = a_train.subset(perm), ie.stable_seed("adapt", fold_index, state, split, cand, cond,
+                                                                        "procrustes", n, "rep", r)
+                align, best_update, dev_loss, moved = exp.adapt(phis[key], target, Qp, train, a_dev, cand, n, seed)
+                res = ie.evaluate(phis[key], (target, align), test, cand, c, device)
+                row = dict(res, set=tag, fold=fold_index, heldout=held, ref=ref,
+                           sources=" ".join(map(str, fold["sources"])), state=state, split=split, cand=cand,
+                           condition=cond, adapt_init="procrustes", adapt_examples=n, repeat=r,
+                           adapt_best_update=best_update, adapt_dev_loss=dev_loss, distance_from_init=moved,
+                           seconds=time.time() - t0)
+                fh.write(json.dumps(row) + "\n")
+                fh.flush()
+                log(f"{tag} held-out {held} {cand} {cond} n={n} repeat {r}: iia {res['iia']:.3f} "
+                    f"(best update {best_update})")
+
+
+def smoke4(device):
+    torch.set_float32_matmul_precision(ie.SMOKE["matmul_precision"])
+    out = ROOT / "results" / "ioi_diag_smoke4"
+    if out.exists():
+        shutil.rmtree(out)
+    cfg = dict(ie.SMOKE)
+    exp = ie.Experiment(SMOKE_ROOT, cfg, device, offline=True)
+    n = cfg["adapt_sizes"][-1]
+    path = out / "variance.jsonl"
+    t = time.time()
+    adapt_variance(exp, 0, [("pos", "shared_joint", n), ("pos", "no_shared", n)], 3, path, "smoke")
+    rows = [json.loads(x) for x in path.read_text().splitlines()]
+    assert len(rows) == 6, len(rows)
+    orig = {json.loads(x)["key"]: json.loads(x)["iia"]
+            for x in (SMOKE_ROOT / "adapt" / "fold0_trained.jsonl").read_text().splitlines()}
+    for r in rows:
+        if r["repeat"] == 0:
+            want = orig[f"trained|default|pos|{r['condition']}|procrustes|n{n}"]
+            assert abs(r["iia"] - want) < 0.02, (r["condition"], r["iia"], want)
+            log(f"repeat 0 {r['condition']}: {r['iia']:.4f} vs original {want:.4f}")
+    log(f"check A (variance rows; repeat 0 reproduces the original adaptation) passed ({time.time() - t:.0f}s)")
+    log(f"smoke4 passed; peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("stage", choices=["smoke", "diag", "extra-maps", "smoke2", "loc-maps", "replace-maps",
-                                          "replace-adapt", "smoke3", "seed4"])
+                                          "replace-adapt", "smoke3", "seed4", "smoke4", "variance"])
     parser.add_argument("--task", type=int, default=0)
     args = parser.parse_args()
     if not torch.cuda.is_available():
@@ -756,6 +836,15 @@ def main():
         shared_adapt(replace_exp(cfg, device), fold_indices(cfg)[args.task], ie.SPLITS, ie.CANDIDATES)
     elif args.stage == "smoke3":
         smoke3(device)
+    elif args.stage == "smoke4":
+        smoke4(device)
+    elif args.stage == "variance":
+        cfg = eval_cfg()
+        tag, k = VAR_TASKS[args.task]
+        exp = ie.Experiment(EVAL_ROOT, cfg, device, offline=True) if tag == "orig" else replace_exp(cfg, device)
+        path = ROOT / "results" / "ioi_diag" / "variance" / f"{tag}_fold{k}.jsonl"
+        path.unlink(missing_ok=True)
+        adapt_variance(exp, k, VAR_RUNS, VAR_REPEATS, path, tag)
     else:  # seed4: task 0 = margin patching + probes, task 1 = restricted IIA
         cfg = eval_cfg()
         out = ROOT / "results" / "ioi_diag" / "seed4"
