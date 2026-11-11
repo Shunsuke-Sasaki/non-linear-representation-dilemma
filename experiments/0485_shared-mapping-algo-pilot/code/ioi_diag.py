@@ -693,8 +693,9 @@ def smoke3(device):
     none = [r for r in patch if r["layer"] == -1]
     assert all(abs(r["effect"]) < 1e-6 for r in none)
     n_layers = max(r["layer"] for r in patch) + 1
-    assert len(patch) == (1 + n_layers * len(ie.POSITIONS)) * len(ie.CANDIDATES)
-    assert len(probe) == n_layers * len(P3_POSITIONS) * len(ie.CANDIDATES)
+    n_models = 2  # trained 1 and random 1
+    assert len(patch) == n_models * (1 + n_layers * len(ie.POSITIONS)) * len(ie.CANDIDATES), len(patch)
+    assert len(probe) == n_models * n_layers * len(P3_POSITIONS) * len(ie.CANDIDATES), len(probe)
     # the binary IIA of the margin rows equals the phase-1 patching_sweep on the same pairs
     exp = DiagExperiment(out / "_models", cfg, device, SMOKE_ROOT, offline=True)
     pairs, _ = valid_pairs(exp.pairs("default", "test"), 64)
