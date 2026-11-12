@@ -4,6 +4,10 @@
 #   sbatch --dependency=afterok:<smoke5> --time=01:00:00 code/ioi-ioname.sbatch identity
 #   sbatch --array=0-7 --dependency=afterok:<smoke5> code/ioi-ioname.sbatch maps --num-tasks 8 --layers 12
 #   sbatch --array=0-7 code/ioi-ioname.sbatch maps --num-tasks 8 --layers 6 18
+# Phase 6 (transfer of C_name):
+#   sbatch --time=00:40:00 code/ioi-ioname.sbatch smoke6
+#   sbatch --array=0-9 --dependency=afterok:<smoke6> code/ioi-ioname.sbatch tmaps --num-tasks 10
+#   sbatch --array=0-4 --time=03:00:00 --dependency=afterok:<tmaps> code/ioi-ioname.sbatch tadapt
 #SBATCH --job-name=0485_ioi-name
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
