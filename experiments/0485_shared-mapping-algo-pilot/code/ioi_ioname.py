@@ -500,7 +500,7 @@ def smoke7(device):
         f"vs phase 6 {old['test'][0]['iia']:.4f}) passed ({time.time() - t:.0f}s)")
 
     t = time.time()  # B: a negative margin forces a rollback at every check after the first best
-    eb = transfer_exp(dict(cfg, **S_TRAIN, map_rollback=-100.0, map_max_rollbacks=2, map_max_epochs=4), SMOKE_ROOT,
+    eb = transfer_exp(dict(cfg, **{**S_TRAIN, "map_rollback": -100.0, "map_max_rollbacks": 2, "map_max_epochs": 4}), SMOKE_ROOT,
                       out / "rollback", device, e6._models)
     eb.train_map("joint", "trained", "name", "default", 0)  # joint: the source alignments are restored too
     ck = torch.load(eb.map_path("joint", "trained", "default", "name", 0), map_location="cpu", weights_only=False)
