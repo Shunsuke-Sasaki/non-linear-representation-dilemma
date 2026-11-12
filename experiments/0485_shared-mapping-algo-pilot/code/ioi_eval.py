@@ -654,7 +654,9 @@ class Experiment:
                 align = TrainableOrthogonalAlignment(Q).to(self.device)
                 trainable.append(align)
             members.append((self.get_model(state, s), align))
-        phi = self.new_phi(stable_seed("phi", kind, state, cand, split, idx))
+        restart = c.get("map_restart", 0)  # 0 keeps the seeds of the earlier runs
+        phi = self.new_phi(stable_seed("phi", kind, state, cand, split, idx, *([restart] if restart else [])))
+        clip, margin = c.get("map_clip", 0), c.get("map_rollback")  # both off unless set (phase 7 of ioi_ioname)
         params = list(phi.parameters()) + [p for a in trainable for p in a.parameters()]
         optimizer = optim.Adam(params, lr=c["map_lr"])
         plateau = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=c["map_sched_patience"])
@@ -664,7 +666,7 @@ class Experiment:
         max_updates = updates_per_epoch * c["map_max_epochs"]
 
         state_path = out.with_suffix(".resume.pt")
-        st = dict(update=0, best_loss=float("inf"), best=None, bad=0, history=[])
+        st = dict(update=0, best_loss=float("inf"), best=None, bad=0, history=[], rollbacks=0, lr_scale=1.0)
         r = None
         if state_path.exists():
             try:
@@ -700,7 +702,7 @@ class Experiment:
             sel = perm[pos * per_member * len(members):(pos + 1) * per_member * len(members)]
             if u < c["map_warmup"]:  # linear warm-up (das_llm.py lr_warmup_steps), then ReduceLROnPlateau
                 for grp in optimizer.param_groups:
-                    grp["lr"] = c["map_lr"] * (u + 1) / c["map_warmup"]
+                    grp["lr"] = c["map_lr"] * st.get("lr_scale", 1.0) * (u + 1) / c["map_warmup"]
             optimizer.zero_grad()
             total = 0.0
             for j, m in enumerate(members):
@@ -710,18 +712,39 @@ class Experiment:
                 loss = loss.mean() / len(members)
                 loss.backward()
                 total += loss.item()
+            if clip:
+                torch.nn.utils.clip_grad_norm_(params, clip)
             optimizer.step()
             st["update"] += 1
             if st["update"] % c["map_val_interval"] == 0 or st["update"] == max_updates:
                 res = dev_eval()
                 dev_loss = sum(r["loss"] for r in res) / len(res)
-                if st["update"] > c["map_warmup"]:
+                diverged = margin is not None and st["best"] is not None and not dev_loss <= st["best_loss"] + margin
+                if diverged:  # back to the best point, half the learning rate, fresh Adam moments
+                    phi.load_state_dict(st["best"]["phi"])
+                    for a, s_ in zip(trainable, st["best"]["align_states"]):
+                        a.load_state_dict(s_)
+                    optimizer.state.clear()
+                    st["rollbacks"] += 1
+                    st["lr_scale"] *= 0.5
+                    for grp in optimizer.param_groups:
+                        grp["lr"] *= 0.5
+                    log(f"  update {st['update']}: dev_loss {dev_loss:.4f} > best {st['best_loss']:.4f} + {margin}; "
+                        f"rollback {st['rollbacks']} to update {st['best']['update']}, lr {optimizer.param_groups[0]['lr']:.2e}")
+                    if st["rollbacks"] > c.get("map_max_rollbacks", 4):
+                        log("  too many rollbacks; stopping")
+                        st["bad"] = c["map_patience"]
+                elif st["update"] > c["map_warmup"]:
                     plateau.step(dev_loss)
-                if dev_loss < st["best_loss"]:
+                if diverged:
+                    pass  # neither a new best nor a bad check
+                elif dev_loss < st["best_loss"]:
                     st["bad"] = 0 if st["best_loss"] - dev_loss > c["map_threshold"] else st["bad"] + 1
                     st["best_loss"] = dev_loss
                     st["best"] = {"phi": copy.deepcopy(phi.state_dict()),
-                                  "aligns": [a.matrix().detach().cpu() for a in trainable], "update": st["update"]}
+                                  "aligns": [a.matrix().detach().cpu() for a in trainable],
+                                  "align_states": [copy.deepcopy(a.state_dict()) for a in trainable],
+                                  "update": st["update"]}
                 else:
                     st["bad"] += 1
                 st["history"].append({"update": st["update"], "train_loss": total, "dev_loss": dev_loss,
@@ -744,6 +767,8 @@ class Experiment:
                                                             for i, s in enumerate(seeds)},
                      "info": {"kind": kind, "state": state, "cand": cand, "split": split, "idx": idx, "seeds": seeds,
                               "best_update": st["best"]["update"], "updates": st["update"],
+                              "best_dev_loss": st["best_loss"], "rollbacks": st.get("rollbacks", 0),
+                              "restart": restart, "map_lr": c["map_lr"], "map_clip": clip, "map_rollback": margin,
                               "seconds": time.time() - t0, "history": st["history"]},
                      "test": tests}, out)
         state_path.unlink(missing_ok=True)

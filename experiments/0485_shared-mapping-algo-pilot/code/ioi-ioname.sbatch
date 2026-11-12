@@ -8,6 +8,10 @@
 #   sbatch --time=00:40:00 code/ioi-ioname.sbatch smoke6
 #   sbatch --array=0-9 --dependency=afterok:<smoke6> code/ioi-ioname.sbatch tmaps --num-tasks 10
 #   sbatch --array=0-4 --time=03:00:00 --dependency=afterok:<tmaps> code/ioi-ioname.sbatch tadapt
+# Phase 7 (both candidates retrained with stabilised map training):
+#   sbatch --time=00:40:00 code/ioi-ioname.sbatch smoke7
+#   sbatch --array=0-39 --dependency=afterok:<smoke7> code/ioi-ioname.sbatch smaps --num-tasks 40 --restarts 3
+#   sbatch --array=0-4 --time=03:00:00 --dependency=afterok:<smaps> code/ioi-ioname.sbatch sadapt --restarts 3
 #SBATCH --job-name=0485_ioi-name
 #SBATCH --partition=gpu
 #SBATCH --nodes=1

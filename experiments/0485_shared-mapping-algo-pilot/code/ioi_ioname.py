@@ -27,7 +27,15 @@ Phase 6 (transfer of C_name; layer 12, END, revnet8, trained seeds 1-5, the fold
   tadapt --task k        held-out adaptation of fold k (A_m only, Procrustes init): shared_joint and no_shared,
                          n in T_SIZES, T_REPEATS repeats (new minibatch seed and n-subset), and individual_self;
                          4-way evaluation of both candidates -> results/ioi_ioname_transfer/adapt/fold{k}.jsonl
-  C_pos reuses the joint / individual maps of results/ioi_eval (trained on all pairs; the C_name maps are trained
+Phase 7 (phase 6 maps diverged: loss jumped to ~10.4 and the IIA of every source fell to ~.5; no clipping):
+  both candidates retrained on the disjoint pairs with lr 3e-4, gradient clipping 1.0, and a rollback to the best
+  point (half lr, fresh Adam moments) when the dev loss exceeds the best by 0.5; --restarts phi initialisations each,
+  the one with the lowest source dev loss is used (held-out data are not looked at). Maps whose 2-way source test
+  IIA is >= S_PASS on every source are flagged (joint_passed / indiv_passed) in the adaptation rows.
+  smoke7                 checks on results/ioi_smoke -> results/ioi_ioname_stable_smoke
+  smaps --task i --num-tasks n [--restarts r]   every n-th map of smap_tasks -> results/ioi_ioname_stable/r{r}/
+  sadapt --task k [--restarts r]                selection (selection.json) and the phase-6 adaptation of fold k
+  Phase 6 note: C_pos reuses the joint / individual maps of results/ioi_eval (trained on all pairs; the C_name maps are trained
   on the disjoint pairs). Adaptation and test pairs are the disjoint ones for both candidates.
 """
 import argparse
@@ -317,10 +325,10 @@ T_REPEATS = 3
 T_CONDS = ["shared_joint", "no_shared"]
 
 
-def transfer_exp(cfg, data_root, out, device):
+def transfer_exp(cfg, data_root, out, device, models=None):
     cfg = dict(cfg, layer=12, phi="revnet8", position="last")
     assert cfg["revnet_blocks"] == 8
-    exp = NameExperiment(out, cfg, device, data_root)
+    exp = NameExperiment(out, cfg, device, data_root, models)
     exp.write_config()
     return exp
 
@@ -335,7 +343,8 @@ def t_phi(exp, pos_exp, kind, split, cand, idx):
     return (pos_exp if cand == "pos" else exp).load_phi(kind, "trained", split, cand, idx)
 
 
-def run_tadapt(exp, pos_exp, fold_index, splits, sizes, repeats, path, device):
+def run_tadapt(exp, get_phi, fold_index, splits, sizes, repeats, path, device, extra=None):
+    """get_phi(kind, split, cand, idx) -> frozen phi. extra(split, cand, fold_index) -> dict added to every row."""
     c = exp.cfg
     fold = exp.folds()[fold_index]
     held, ref = fold["heldout"], fold["ref"]
@@ -346,13 +355,14 @@ def run_tadapt(exp, pos_exp, fold_index, splits, sizes, repeats, path, device):
         test, a_train, a_dev = exp.pairs(split, "test"), exp.pairs(split, "adapt_train"), exp.pairs(split, "adapt_dev")
         Qp, cost = exp.procrustes_init("trained", ref, held, split)
         for cand in CANDS:
-            common = dict(fold=fold_index, heldout=held, ref=ref, sources=fold["sources"], split=split, trained_on=cand)
+            common = dict(fold=fold_index, heldout=held, ref=ref, sources=fold["sources"], split=split, trained_on=cand,
+                          **(extra(split, cand, fold_index) if extra else {}))
             key = f"{split}|{cand}|individual_self"
             if key not in done:
-                phi = t_phi(exp, pos_exp, "individual", split, cand, c["seeds"].index(held))
+                phi = get_phi("individual", split, cand, c["seeds"].index(held))
                 write_row(path, dict(eval4(phi, (target, ie.IdentityAlignment()), test, c, device), key=key,
                                      condition="individual_self", adapt_examples=None, repeat=0, **common))
-            phis = {"shared_joint": t_phi(exp, pos_exp, "joint", split, cand, fold_index), "no_shared": ie.IdentityMap()}
+            phis = {"shared_joint": get_phi("joint", split, cand, fold_index), "no_shared": ie.IdentityMap()}
             for cond in T_CONDS:
                 phi = phis[cond]
                 for n in sizes:
@@ -393,7 +403,7 @@ def smoke6(device):
     t = time.time()
     path = out / "adapt" / "fold0.jsonl"
     sizes = [0, cfg["adapt_sizes"][-1]]
-    run_tadapt(exp, pos_exp, 0, ["default"], sizes, 2, path, device)
+    run_tadapt(exp, lambda *a: t_phi(exp, pos_exp, *a), 0, ["default"], sizes, 2, path, device)
     rows = [json.loads(x) for x in path.read_text().splitlines()]
     per_cand = 1 + len(T_CONDS) * (1 + 2)
     assert len(rows) == 2 * per_cand, len(rows)
@@ -411,18 +421,143 @@ def smoke6(device):
         f"{orig['trained|default|pos|individual_self']['iia']:.4f}")
     for r in rows:
         log(f"{r['key']}: pos iia4 {r['pos_iia4']:.3f}, name iia4 {r['name_iia4']:.3f}, {r.get('seconds', 0):.1f}s")
-    run_tadapt(exp, pos_exp, 0, ["default"], sizes, 2, path, device)
+    run_tadapt(exp, lambda *a: t_phi(exp, pos_exp, *a), 0, ["default"], sizes, 2, path, device)
     assert len(path.read_text().splitlines()) == 2 * per_cand
     log(f"check B (adaptation rows, reused C_pos maps, Procrustes, resume) passed ({time.time() - t:.0f}s)")
     log(f"smoke6 passed; peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
 
 
+# --- Phase 7: both candidates retrained with stabilised map training, best of S_RESTARTS by source dev loss
+S_OUT = ROOT / "results" / "ioi_ioname_stable"
+S_RESTARTS = 3
+S_PASS = 0.95  # a map counts as fitted when its 2-way test IIA is >= S_PASS on every source model
+S_TRAIN = dict(map_lr=3e-4, map_clip=1.0, map_rollback=0.5, map_max_rollbacks=4)
+
+
+def stable_exps(cfg, data_root, out, device, restarts=S_RESTARTS, train=S_TRAIN):  # one root per restart
+    exps = []
+    for r in range(restarts):
+        models = exps[0]._models if exps else None
+        exps.append(transfer_exp(dict(cfg, **train, map_restart=r), data_root, Path(out) / f"r{r}", device, models))
+    return exps
+
+
+def smap_tasks(exp, restarts=S_RESTARTS):
+    return [(r, cand, kind, split, idx) for r in range(restarts) for cand in CANDS
+            for kind, split, idx in tmap_tasks(exp)]
+
+
+def s_select(exps, items):
+    """items: (cand, kind, split, idx). Choose the restart with the lowest source dev loss (no held-out data)."""
+    out = {}
+    for cand, kind, split, idx in items:
+        runs = []
+        for e in exps:
+            ck = torch.load(e.map_path(kind, "trained", split, cand, idx), map_location="cpu", weights_only=False)
+            i = ck["info"]
+            runs.append(dict(restart=i["restart"], best_dev_loss=i["best_dev_loss"], best_update=i["best_update"],
+                             updates=i["updates"], rollbacks=i["rollbacks"], seeds=i["seeds"],
+                             test_iia=[t["iia"] for t in ck["test"]]))
+        best = min(runs, key=lambda x: x["best_dev_loss"])
+        out[(cand, kind, split, idx)] = dict(cand=cand, kind=kind, split=split, idx=idx, chosen=best["restart"],
+                                             min_source_iia=min(best["test_iia"]),
+                                             passed=min(best["test_iia"]) >= S_PASS, runs=runs)
+    return out
+
+
+def run_sadapt(exps, sel, fold_index, splits, sizes, repeats, path, device):
+    exp = exps[0]
+    held_idx = exp.cfg["seeds"].index(exp.folds()[fold_index]["heldout"])
+
+    def get_phi(kind, split, cand, idx):
+        return exps[sel[(cand, kind, split, idx)]["chosen"]].load_phi(kind, "trained", split, cand, idx)
+
+    def extra(split, cand, k):
+        j, i = sel[(cand, "joint", split, k)], sel[(cand, "individual", split, held_idx)]
+        return dict(joint_restart=j["chosen"], joint_passed=j["passed"], joint_min_source_iia=j["min_source_iia"],
+                    indiv_restart=i["chosen"], indiv_passed=i["passed"], indiv_source_iia=i["min_source_iia"])
+    run_tadapt(exp, get_phi, fold_index, splits, sizes, repeats, path, device, extra)
+
+
+def smoke7(device):
+    torch.set_float32_matmul_precision(ie.SMOKE["matmul_precision"])
+    out = ROOT / "results" / "ioi_ioname_stable_smoke"
+    if out.exists():
+        shutil.rmtree(out)
+    cfg = dict(ie.SMOKE)
+    item = ("individual", "trained", "name", "default", 0)
+
+    t = time.time()  # A: without the new keys, train_map behaves as in phase 6
+    e6 = transfer_exp(cfg, SMOKE_ROOT, out / "phase6", device)
+    e6.train_map(*item)
+    new = torch.load(e6.map_path("individual", "trained", "default", "name", 0), map_location="cpu", weights_only=False)
+    old_path = ROOT / "results" / "ioi_ioname_transfer_smoke" / "maps" / "trained" / "default" / "name" / "individual_0.pt"
+    old = torch.load(old_path, map_location="cpu", weights_only=False)
+    log(f"best update {new['info']['best_update']} (phase 6 smoke: {old['info']['best_update']})")
+    assert abs(new["test"][0]["iia"] - old["test"][0]["iia"]) < 0.02, (new["test"][0]["iia"], old["test"][0]["iia"])
+    assert new["info"]["rollbacks"] == 0 and new["info"]["map_clip"] == 0 and new["info"]["map_rollback"] is None
+    log(f"check A (defaults unchanged: best update {new['info']['best_update']}, test IIA {new['test'][0]['iia']:.4f} "
+        f"vs phase 6 {old['test'][0]['iia']:.4f}) passed ({time.time() - t:.0f}s)")
+
+    t = time.time()  # B: a negative margin forces a rollback at every check after the first best
+    eb = transfer_exp(dict(cfg, **S_TRAIN, map_rollback=-100.0, map_max_rollbacks=2, map_max_epochs=4), SMOKE_ROOT,
+                      out / "rollback", device, e6._models)
+    eb.train_map("joint", "trained", "name", "default", 0)  # joint: the source alignments are restored too
+    ck = torch.load(eb.map_path("joint", "trained", "default", "name", 0), map_location="cpu", weights_only=False)
+    assert ck["info"]["rollbacks"] == 3, ck["info"]["rollbacks"]
+    lrs = [h["lr"] for h in ck["info"]["history"]]
+    assert abs(lrs[-1] - S_TRAIN["map_lr"] / 8) < 1e-12 or lrs[-1] < S_TRAIN["map_lr"] / 8, lrs
+    assert ck["info"]["best_update"] == ck["info"]["history"][0]["update"], ck["info"]
+    log(f"check B (rollback: 3 rollbacks, lr {lrs}, stopped at update {ck['info']['updates']}) passed "
+        f"({time.time() - t:.0f}s)")
+
+    t = time.time()  # C: restarts, selection, adaptation rows, resume
+    exps = stable_exps(cfg, SMOKE_ROOT, out, device, restarts=2)
+    exps[0]._models = e6._models
+    for e in exps[1:]:
+        e._models = e6._models
+    items = [(cand, kind, "default", 0) for cand in CANDS for kind in ["joint", "individual"]]
+    for e in exps:
+        for cand, kind, split, idx in items:
+            e.train_map(kind, "trained", cand, split, idx)
+    p0 = torch.load(exps[0].map_path("joint", "trained", "default", "name", 0), map_location="cpu", weights_only=False)
+    p1 = torch.load(exps[1].map_path("joint", "trained", "default", "name", 0), map_location="cpu", weights_only=False)
+    assert p0["info"]["restart"] == 0 and p1["info"]["restart"] == 1
+    k0 = next(iter(p0["phi"]))
+    assert not torch.equal(p0["phi"][k0], p1["phi"][k0]), "restarts start from the same phi"
+    sel = s_select(exps, items)
+    for v in sel.values():
+        log(f"select {v['cand']} {v['kind']}: restart {v['chosen']}, dev losses "
+            f"{[round(r['best_dev_loss'], 4) for r in v['runs']]}, source IIA {[r['test_iia'] for r in v['runs']]}")
+        assert v["chosen"] == min(v["runs"], key=lambda r: r["best_dev_loss"])["restart"]
+    path = out / "adapt" / "fold0.jsonl"
+    sizes = [0, cfg["adapt_sizes"][-1]]
+    run_sadapt(exps, sel, 0, ["default"], sizes, 2, path, device)
+    per_cand = 1 + len(T_CONDS) * (1 + 2)
+    rows = [json.loads(x) for x in path.read_text().splitlines()]
+    assert len(rows) == 2 * per_cand and all("joint_passed" in r for r in rows), len(rows)
+    for r in rows:
+        log(f"{r['key']}: pos iia4 {r['pos_iia4']:.3f}, name iia4 {r['name_iia4']:.3f}, joint restart {r['joint_restart']}")
+    run_sadapt(exps, sel, 0, ["default"], sizes, 2, path, device)
+    assert len(path.read_text().splitlines()) == 2 * per_cand
+    log(f"check C (restarts differ, selection by dev loss, adaptation rows, resume) passed ({time.time() - t:.0f}s)")
+    log(f"smoke7 passed; peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+
+
+def write_selection(sel, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(list(sel.values()), indent=1))
+    tmp.replace(path)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["smoke5", "identity", "maps", "smoke6", "tmaps", "tadapt"])
+    parser.add_argument("stage", choices=["smoke5", "identity", "maps", "smoke6", "tmaps", "tadapt", "smoke7", "smaps", "sadapt"])
     parser.add_argument("--task", type=int, default=0)
     parser.add_argument("--num-tasks", type=int, default=1)
     parser.add_argument("--layers", type=int, nargs="+", default=LAYERS)
+    parser.add_argument("--restarts", type=int, default=S_RESTARTS)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable; run this on a GPU node")
@@ -437,6 +572,20 @@ def main():
         run_identity(cfg, EVAL_ROOT, OUT, args.layers, ["trained", "random"], OUT / "eval" / "identity.jsonl", device)
     elif args.stage == "smoke6":
         smoke6(device)
+    elif args.stage == "smoke7":
+        smoke7(device)
+    elif args.stage in ("smaps", "sadapt"):
+        exps = stable_exps(idg.eval_cfg(), EVAL_ROOT, S_OUT, device, args.restarts)
+        if args.stage == "smaps":
+            tasks = smap_tasks(exps[0], args.restarts)[args.task::args.num_tasks]
+            log(f"{len(tasks)} maps: {tasks}")
+            for r, cand, kind, split, idx in tasks:
+                exps[r].train_map(kind, "trained", cand, split, idx)
+        else:
+            sel = s_select(exps, [(cand, kind, split, idx) for cand in CANDS for kind, split, idx in tmap_tasks(exps[0])])
+            write_selection(sel, S_OUT / "selection.json")
+            run_sadapt(exps, sel, args.task, ie.SPLITS, T_SIZES, T_REPEATS, S_OUT / "adapt" / f"fold{args.task}.jsonl",
+                       device)
     elif args.stage in ("tmaps", "tadapt"):
         cfg = idg.eval_cfg()
         exp = transfer_exp(cfg, EVAL_ROOT, T_OUT, device)
@@ -447,7 +596,7 @@ def main():
                 exp.train_map(kind, "trained", "name", split, idx)
         else:
             pos_exp = ie.Experiment(EVAL_ROOT, cfg, device, offline=True)
-            run_tadapt(exp, pos_exp, args.task, ie.SPLITS, T_SIZES, T_REPEATS,
+            run_tadapt(exp, lambda *a: t_phi(exp, pos_exp, *a), args.task, ie.SPLITS, T_SIZES, T_REPEATS,
                        T_OUT / "adapt" / f"fold{args.task}.jsonl", device)
     else:
         cfg = idg.eval_cfg()

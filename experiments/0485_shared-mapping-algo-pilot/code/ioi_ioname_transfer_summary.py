@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tables of IOI phase 6 (transfer of C_name vs C_pos), stdlib only.
+"""Tables of IOI phase 6 / 7 (transfer of C_name vs C_pos), stdlib only. Phase 7: results subdir ioi_ioname_stable.
 Usage: python3 ioi_ioname_transfer_summary.py <EXP> [results subdir]"""
 import json
 import statistics as st
@@ -57,6 +57,19 @@ def main():
         v = picks[k]
         out.append(f"| {k[0]} | {k[1]} | {k[2]} | " + " | ".join(
             f"{st.mean(r['pick_' + x] for r in v):.3f}" for x in ["base_io", "base_s", "src_io", "src_s"]) + " |")
+    sel_path = root / "selection.json"
+    if sel_path.exists():  # phase 7: which restart was used and how well it fits its source models
+        sel = json.loads(sel_path.read_text())
+        out += ["", "## Maps used (phase 7): restart with the lowest source dev loss", "",
+                "2-way test IIA on each source model of the chosen restart; passed = all >= 0.95. "
+                "Other restarts: best dev loss / min source IIA.", "",
+                "| split | cand | kind | idx | chosen | source IIA | passed | rollbacks | all restarts |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for v in sorted(sel, key=lambda v: (v["split"], v["cand"], v["kind"], v["idx"])):
+            ch = next(r for r in v["runs"] if r["restart"] == v["chosen"])
+            others = ", ".join(f"r{r['restart']} {r['best_dev_loss']:.3f}/{min(r['test_iia']):.3f}" for r in v["runs"])
+            out.append(f"| {v['split']} | {v['cand']} | {v['kind']} | {v['idx']} | r{v['chosen']} | "
+                       + " ".join(f"{x:.3f}" for x in ch["test_iia"]) + f" | {v['passed']} | {ch['rollbacks']} | {others} |")
     (root / "summary.md").write_text("\n".join(out) + "\n")
     print("\n".join(out))
 
