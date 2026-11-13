@@ -15,6 +15,8 @@
 #   extra restarts for namesplit C_name only (r0 exists and is skipped):
 #   sbatch --array=0-9 code/ioi-ioname.sbatch smaps --num-tasks 10 --restarts 3 --cands name --splits namesplit
 #   sbatch --array=0-4 --time=02:00:00 code/ioi-ioname.sbatch sadapt --restarts 3 --cands name --splits namesplit --tag ns_name_r3
+#   extra held-out models (seeds 6-9) for the phase-7 joint maps (restart 0, as the phase-7 tables):
+#   sbatch --array=0-19 --time=02:00:00 code/ioi-ioname.sbatch xadapt --restarts 1
 #SBATCH --job-name=0485_ioi-name
 #SBATCH --partition=gpu
 #SBATCH --nodes=1

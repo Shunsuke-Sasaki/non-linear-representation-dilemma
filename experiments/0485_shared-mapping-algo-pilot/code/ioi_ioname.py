@@ -35,6 +35,9 @@ Phase 7 (phase 6 maps diverged: loss jumped to ~10.4 and the IIA of every source
   smoke7                 checks on results/ioi_smoke -> results/ioi_ioname_stable_smoke
   smaps --task i --num-tasks n [--restarts r]   every n-th map of smap_tasks -> results/ioi_ioname_stable/r{r}/
   sadapt --task k [--restarts r]                selection (selection.json) and the phase-6 adaptation of fold k
+  xadapt --task i [--restarts r]   the joint maps of fold i // 4 adapted to extra seed X_SEEDS[i % 4] (no phi was
+                         trained on seeds 6-9; same conditions as sadapt, no individual_self)
+                         -> results/ioi_ioname_stable/extra/adapt/fold{k}_seed{t}.jsonl
   --cands / --splits restrict smaps and sadapt; restarts can be added for some maps only (missing restarts are
   skipped in the selection); sadapt --tag writes selection and adaptation rows to results/ioi_ioname_stable/<tag>/
   Phase 6 note: C_pos reuses the joint / individual maps of results/ioi_eval (trained on all pairs; the C_name maps are trained
@@ -345,11 +348,12 @@ def t_phi(exp, pos_exp, kind, split, cand, idx):
     return (pos_exp if cand == "pos" else exp).load_phi(kind, "trained", split, cand, idx)
 
 
-def run_tadapt(exp, get_phi, fold_index, splits, sizes, repeats, path, device, extra=None, cands=CANDS):
-    """get_phi(kind, split, cand, idx) -> frozen phi. extra(split, cand, fold_index) -> dict added to every row."""
+def run_tadapt(exp, get_phi, fold_index, splits, sizes, repeats, path, device, extra=None, cands=CANDS, target=None):
+    """get_phi(kind, split, cand, idx) -> frozen phi. extra(split, cand, fold_index) -> dict added to every row.
+    target: a model outside cfg seeds to adapt to instead of the fold's held-out model (no individual_self row)."""
     c = exp.cfg
     fold = exp.folds()[fold_index]
-    held, ref = fold["heldout"], fold["ref"]
+    held, ref = (fold["heldout"] if target is None else target), fold["ref"]
     target = exp.get_model("trained", held)
     done = done_keys(path)
     t_start = time.time()
@@ -360,7 +364,7 @@ def run_tadapt(exp, get_phi, fold_index, splits, sizes, repeats, path, device, e
             common = dict(fold=fold_index, heldout=held, ref=ref, sources=fold["sources"], split=split, trained_on=cand,
                           **(extra(split, cand, fold_index) if extra else {}))
             key = f"{split}|{cand}|individual_self"
-            if key not in done:
+            if held in c["seeds"] and key not in done:
                 phi = get_phi("individual", split, cand, c["seeds"].index(held))
                 write_row(path, dict(eval4(phi, (target, ie.IdentityAlignment()), test, c, device), key=key,
                                      condition="individual_self", adapt_examples=None, repeat=0, **common))
@@ -484,6 +488,24 @@ def run_sadapt(exps, sel, fold_index, splits, sizes, repeats, path, device, cand
     run_tadapt(exp, get_phi, fold_index, splits, sizes, repeats, path, device, extra, cands)
 
 
+X_SEEDS = [6, 7, 8, 9]  # trained Pythia seeds that no phi was trained on (ioi_diag EXTRA_SEEDS)
+
+
+def xadapt_task(i):
+    return i // len(X_SEEDS), X_SEEDS[i % len(X_SEEDS)]  # (fold, extra target seed); 5 folds x 4 seeds = 20 tasks
+
+
+def run_xadapt(exps, sel, fold_index, target, splits, sizes, repeats, path, device, cands=CANDS):
+    def get_phi(kind, split, cand, idx):
+        return exps[sel[(cand, kind, split, idx)]["chosen"]].load_phi(kind, "trained", split, cand, idx)
+
+    def extra(split, cand, k):
+        j = sel[(cand, "joint", split, k)]
+        return dict(target=target, joint_restart=j["chosen"], joint_passed=j["passed"],
+                    joint_min_source_iia=j["min_source_iia"])
+    run_tadapt(exps[0], get_phi, fold_index, splits, sizes, repeats, path, device, extra, cands, target=target)
+
+
 def smoke7(device):
     torch.set_float32_matmul_precision(ie.SMOKE["matmul_precision"])
     out = ROOT / "results" / "ioi_ioname_stable_smoke"
@@ -558,7 +580,7 @@ def write_selection(sel, path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["smoke5", "identity", "maps", "smoke6", "tmaps", "tadapt", "smoke7", "smaps", "sadapt"])
+    parser.add_argument("stage", choices=["smoke5", "identity", "maps", "smoke6", "tmaps", "tadapt", "smoke7", "smaps", "sadapt", "xadapt"])
     parser.add_argument("--task", type=int, default=0)
     parser.add_argument("--num-tasks", type=int, default=1)
     parser.add_argument("--layers", type=int, nargs="+", default=LAYERS)
@@ -582,13 +604,22 @@ def main():
         smoke6(device)
     elif args.stage == "smoke7":
         smoke7(device)
-    elif args.stage in ("smaps", "sadapt"):
+    elif args.stage in ("smaps", "sadapt", "xadapt"):
         exps = stable_exps(idg.eval_cfg(), EVAL_ROOT, S_OUT, device, args.restarts)
         if args.stage == "smaps":
             tasks = smap_tasks(exps[0], args.restarts, args.cands, args.splits)[args.task::args.num_tasks]
             log(f"{len(tasks)} maps: {tasks}")
             for r, cand, kind, split, idx in tasks:
                 exps[r].train_map(kind, "trained", cand, split, idx)
+        elif args.stage == "xadapt":
+            fold_index, target = xadapt_task(args.task)
+            sel = s_select(exps, [(cand, "joint", split, k) for cand in args.cands for split in args.splits
+                                  for k in range(len(exps[0].cfg["seeds"]))])
+            dst = S_OUT / (args.tag or "extra")
+            write_selection(sel, dst / "selection.json")
+            log(f"fold {fold_index} (sources {exps[0].folds()[fold_index]['sources']}) -> extra target seed {target}")
+            run_xadapt(exps, sel, fold_index, target, args.splits, T_SIZES, T_REPEATS,
+                       dst / "adapt" / f"fold{fold_index}_seed{target}.jsonl", device, args.cands)
         else:
             sel = s_select(exps, [(cand, kind, split, idx) for cand in args.cands
                                   for kind, split, idx in tmap_tasks(exps[0]) if split in args.splits])
