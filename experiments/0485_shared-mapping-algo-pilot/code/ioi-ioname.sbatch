@@ -12,6 +12,9 @@
 #   sbatch --time=00:40:00 code/ioi-ioname.sbatch smoke7
 #   sbatch --array=0-39 --dependency=afterok:<smoke7> code/ioi-ioname.sbatch smaps --num-tasks 40 --restarts 3
 #   sbatch --array=0-4 --time=03:00:00 --dependency=afterok:<smaps> code/ioi-ioname.sbatch sadapt --restarts 3
+#   extra restarts for namesplit C_name only (r0 exists and is skipped):
+#   sbatch --array=0-9 code/ioi-ioname.sbatch smaps --num-tasks 10 --restarts 3 --cands name --splits namesplit
+#   sbatch --array=0-4 --time=02:00:00 code/ioi-ioname.sbatch sadapt --restarts 3 --cands name --splits namesplit --tag ns_name_r3
 #SBATCH --job-name=0485_ioi-name
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
