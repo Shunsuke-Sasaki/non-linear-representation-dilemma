@@ -94,8 +94,8 @@ def part_a(exp, seed, device, state="trained"):
     names = {pn: torch.unique(torch.cat([pools[pn]["tok_io"], pools[pn]["tok_s"]])).to(device)
              for pn in ("train", "eval", "test")}
     all_names = torch.unique(torch.cat(list(names.values())))
-    W_U = model.embed_out.weight.float()
-    tables = {"unembed": W_U.double(), "embed": model.gpt_neox.embed_in.weight.double()}
+    W_U = model.get_output_embeddings().weight.float()  # lm_head (embed_out in older transformers); not tied in Pythia
+    tables = {"unembed": W_U.double(), "embed": model.get_input_embeddings().weight.double()}
     ln = model.gpt_neox.final_layer_norm
     rows = []
     for l in range(n_layers):
